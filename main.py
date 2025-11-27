@@ -269,4 +269,5 @@ async def start_task(payload: TaskPayload, background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Use 0.0.0.0 to allow external access
+    uvicorn.run(app, host="0.0.0.0", port=8000)
