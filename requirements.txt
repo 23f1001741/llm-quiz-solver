@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+playwright
+google-generativeai
+pandas
+numpy
+requests
+beautifulsoup4
+pydantic
