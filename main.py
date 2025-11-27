@@ -15,7 +15,7 @@ import numpy as np
 import bs4 
 import io
 import base64
-import hashlib # IMPORT HASHLIB
+import hashlib
 from urllib.parse import urljoin 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -27,15 +27,13 @@ import google.generativeai as genai
 # ==============================================================================
 app = FastAPI()
 
-# GET FROM ENVIRONMENT (Secure for Cloud)
+# GET FROM ENVIRONMENT
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
 
 if not GOOGLE_API_KEY:
-    # Fallback for local testing if env var not set (Optional)
-    # But for deployment, we rely on the Environment Variable
-    print("⚠️ WARNING: GOOGLE_API_KEY not found in Environment.")
+    print("⚠️ WARNING: GOOGLE_API_KEY not found via Env Vars")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
@@ -63,7 +61,7 @@ def execute_generated_code(code_str: str):
         "urljoin": urljoin,
         "io": io,
         "base64": base64,
-        "hashlib": hashlib, # ALLOW HASHLIB
+        "hashlib": hashlib,
         "print": print
     }
     local_vars = {}
@@ -78,12 +76,12 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI BRAIN (CRYPTO BREAKER EDITION)
+# 3. GEMINI BRAIN (STABILITY PATCH)
 # ==============================================================================
 async def analyze_task(page_text: str, current_url: str):
     print("🧠 Gemini is thinking...")
     
-    # We pass the student email into the prompt so the LLM can use it for hashing
+    # We pass the student email into the prompt
     prompt = r"""
     You are an automated Data Analyst Agent.
     
@@ -101,6 +99,7 @@ async def analyze_task(page_text: str, current_url: str):
        - Code pattern:
          `match = re.search(r'Scrape\s+([^\s]+)', r'{page_text}')`
          `if match:`
+         `    # Calculate target properly`
          `    target = urljoin('{current_url}', match.group(1))`
          `    print(f"DEBUG: Fetching {{target}}")`
          `    resp = requests.get(target, headers={{'User-Agent': 'Mozilla/5.0'}})`
@@ -110,9 +109,10 @@ async def analyze_task(page_text: str, current_url: str):
          `    # 2. Script Hunter`
          `    if solution == "Not Found":`
          `        soup = BeautifulSoup(resp.text, 'html.parser')`
-         `        scripts = [urljoin(target, s['src']) for s in soup.find_all('script', src=True)]`
+         `        # USE resp.url HERE TO BE SAFE:`
+         `        scripts = [urljoin(resp.url, s['src']) for s in soup.find_all('script', src=True)]`
          `        imports = re.findall(r'from\s+[\"\']\./([^\"\']+)[\"\']', resp.text)`
-         `        for i in imports: scripts.append(urljoin(target, i))`
+         `        for i in imports: scripts.append(urljoin(resp.url, i))`
          `        `
          `        for js_url in scripts:`
          `            try:`
@@ -135,7 +135,6 @@ async def analyze_task(page_text: str, current_url: str):
          `                `
          `                # VARIABLE HUNTER`
          `                if solution == "Not Found":`
-         `                    # Look for const XYZ = "STRING"`
          `                    var_match = re.search(r'(?:const|let|var)\s+\w+\s*=\s*[\"\']([a-zA-Z0-9]+)[\"\']', js_text)`
          `                    if var_match: solution = var_match.group(1)`
          `            except: pass`
@@ -164,7 +163,6 @@ async def analyze_task(page_text: str, current_url: str):
     """
     
     safe_page_text = page_text.replace('{', '{{').replace('}', '}}').replace("'", "")
-    # Pass STUDENT_EMAIL here
     final_prompt = prompt.format(current_url=current_url, page_text=safe_page_text, email=STUDENT_EMAIL)
 
     try:
