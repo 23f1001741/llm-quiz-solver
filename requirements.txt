@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-playwright
+playwright==1.48.0
 google-generativeai
 pandas
 numpy
