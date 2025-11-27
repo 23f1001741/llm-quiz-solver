@@ -76,11 +76,12 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI BRAIN (BULLETPROOF VARIABLES)
+# 3. GEMINI BRAIN (CRASH PROOF EDITION)
 # ==============================================================================
 async def analyze_task(page_text: str, current_url: str):
     print("🧠 Gemini is thinking...")
     
+    # RAW STRING
     prompt = r"""
     You are an automated Data Analyst Agent.
     
@@ -92,7 +93,10 @@ async def analyze_task(page_text: str, current_url: str):
     YOUR GOAL: Write a Python script to solve the task.
     
     CRITICAL INSTRUCTIONS:
-    1. **INITIALIZE:** `solution = "Not Found"`
+    1. **INITIALIZE VARIABLES (MANDATORY):** - Start the script EXACTLY like this:
+         `solution = "Not Found"`
+         `target = '{current_url}'`
+         `limit = None`
     
     2. **SCENARIO A: "Scrape /path"**
        - Code pattern:
@@ -107,10 +111,10 @@ async def analyze_task(page_text: str, current_url: str):
          `    # 2. Script Hunter`
          `    if solution == "Not Found":`
          `        soup = BeautifulSoup(resp.text, 'html.parser')`
-         `        # USE 'target' variable (Safe)`
-         `        scripts = [urljoin(target, s['src']) for s in soup.find_all('script', src=True)]`
+         `        # USE resp.url to resolve relative links safely`
+         `        scripts = [urljoin(resp.url, s['src']) for s in soup.find_all('script', src=True)]`
          `        imports = re.findall(r'from\s+[\"\']\./([^\"\']+)[\"\']', resp.text)`
-         `        for i in imports: scripts.append(urljoin(target, i))`
+         `        for i in imports: scripts.append(urljoin(resp.url, i))`
          `        `
          `        for js_url in scripts:`
          `            try:`
@@ -147,12 +151,11 @@ async def analyze_task(page_text: str, current_url: str):
          `    print(f"DEBUG: Downloading {{d_url}}")`
          `    content = requests.get(d_url).text`
          `    nums = [int(n) for n in re.findall(r'-?\d+', content)]`
-         `    limit = None`
          `    if "Cutoff" in r'{page_text}':`
          `        cutoff_match = re.search(r'Cutoff:\s*(\d+)', r'{page_text}')`
          `        if cutoff_match:`
          `             limit = int(cutoff_match.group(1))`
-         `    # Filter only if limit is found`
+         `    # SAFE FILTERING: Only filter if limit was actually found`
          `    if limit is not None:`
          `         nums = [n for n in nums if n > limit]`
          `    solution = sum(nums)`
@@ -268,4 +271,5 @@ async def start_task(payload: TaskPayload, background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
+    # Use 0.0.0.0 to allow external access
     uvicorn.run(app, host="0.0.0.0", port=8000)
