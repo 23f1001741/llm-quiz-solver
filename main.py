@@ -13,9 +13,9 @@ import base64
 import hashlib
 import mimetypes
 import tempfile
-import csv  # <--- NEW IMPORT
-import random # <--- NEW IMPORT
-import time # <--- NEW IMPORT
+import csv
+import random
+import time
 from urllib.parse import urljoin, urlparse 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -61,7 +61,8 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
-        prompt = "Transcribe this file exactly. If it contains instructions (like 'sum column X' or 'password is Y'), output ONLY the instruction."
+        # UPDATED PROMPT: Ask specifically for math/logic instructions
+        prompt = "Listen carefully. Does the audio mention a COLUMN NAME? Does it mention a FILTER (e.g. 'greater than', 'ends with')? Output the exact math instruction."
         result = model.generate_content([myfile, prompt])
         
         os.unlink(tmp_path)
@@ -102,7 +103,6 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
     print(f"{prefix}👉 Crawling: {url} (Depth {depth})")
 
     try:
-        # 1. HEAD Request (Fast Sniff)
         try:
             head = requests.head(url, timeout=5, allow_redirects=True)
             content_type = head.headers.get("Content-Type", "").lower()
@@ -125,13 +125,11 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
             page = await browser.new_page()
             try:
                 await page.goto(url)
-                # INCREASED TIMEOUT TO 10s for slow JS
                 try:
                     await page.wait_for_load_state("networkidle", timeout=10000)
                 except:
                     pass
                 
-                # Get rendered text
                 visible_text = await page.inner_text("body")
                 context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:4000]}")
                 
@@ -139,7 +137,6 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                     await page.close()
                     return
 
-                # Extract Links
                 html = await page.content()
                 soup = bs4.BeautifulSoup(html, 'html.parser')
                 links = []
@@ -152,7 +149,6 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                                 links.append(full_link)
                 
                 await page.close()
-                
                 print(f"{prefix}   ↳ Found {len(links)} links. Recursing...")
                 
                 for link in links:
@@ -184,7 +180,6 @@ def execute_generated_code(code_str: str):
     print("⚡ Executing Python code...")
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
-    # ADDED CSV, MATH, RANDOM TO GLOBALS
     allowed_globals = {
         "pd": pd, "np": np, "requests": requests, "json": json, "re": re,
         "bs4": bs4, "BeautifulSoup": bs4.BeautifulSoup, "urljoin": urljoin,
@@ -204,7 +199,7 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST
+# 3. GEMINI ANALYST (UPDATED PROMPT)
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
@@ -218,24 +213,26 @@ async def analyze_task(deep_context: str, current_url: str):
     =========================================
     
     CURRENT URL: {current_url}
-    MY EMAIL: {email}
     
     TASK: Write a Python script to calculate the `solution`.
     
-    CRITICAL RULES:
-    1. **Puzzle Assembly**:
-       - The answer is somewhere in the context above.
-       - **SUB-PAGES**: If you see a sub-page text like "Secret code is 12345", that is the answer.
-       - **AUDIO**: If you see "TRANSCRIPT OF audio", follow those instructions (e.g., "sum column X").
+    CRITICAL RULES (READ CAREFULLY):
     
-    2. **Variable Safety**:
-       - Initialize variables. Example: `limit = 0` before checking regex.
-       - Always provide a fallback: `solution = "Not Found"`.
+    1. **AUDIO LOGIC (CRITICAL)**:
+       - The audio transcript contains the MATH INSTRUCTIONS.
+       - If it says "sum numbers greater than 50", you MUST filter: `df[df[col] > 50]`.
+       - If it says "sum numbers *starting with* 9", convert to string and filter.
+       - **Do NOT just sum the whole file unless explicitly told to.**
     
-    3. **Imports**:
-       - `csv`, `json`, `random`, `math` are available. You don't need to import them, but you can.
+    2. **CSV HANDLING**:
+       - You must write code to download the CSV: `df = pd.read_csv(io.StringIO(requests.get(url).text))`
+       - **Check Headers**: If the audio specifies a column name (e.g., "value") but the CSV has no headers, reload with `header=None` and use index (e.g., `df[0]`).
+       - **Clean Data**: If the column contains non-numeric text, force coerce: `pd.to_numeric(df['col'], errors='coerce')`.
     
-    4. **Output**: Return ONLY Python code.
+    3. **General**:
+       - Initialize variables (`limit`, `col_name`) to safe defaults.
+       - Always provide a `solution`.
+       - Output ONLY Python code.
     """
     
     safe_context = deep_context.replace('{', '{{').replace('}', '}}').replace("'", "")
