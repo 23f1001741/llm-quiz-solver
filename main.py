@@ -61,7 +61,7 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
-        # Ask for VERBATIM transcription to capture exact numbers/logic
+        # Ask for VERBATIM transcription to capture exact numbers
         prompt = "Transcribe this audio file VERBATIM. Write down every single word. Do not summarize."
         result = model.generate_content([myfile, prompt])
         
@@ -72,12 +72,10 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
 
 def inspect_csv(content: bytes) -> str:
     """
-    CRITICAL FIX: Do NOT parse with Pandas here. 
-    Just return the raw text head so the LLM can decide if there are headers.
+    Do NOT parse with Pandas here. Just return the raw text head.
     """
     try:
         text_val = content.decode('utf-8', errors='ignore')
-        # Return first 10 lines only
         head = "\n".join(text_val.splitlines()[:10])
         return f"[CSV RAW PREVIEW (First 10 lines)]:\n{head}\n[END PREVIEW]"
     except Exception as e:
@@ -196,14 +194,24 @@ def execute_generated_code(code_str: str):
     try:
         exec(code_str, allowed_globals, local_vars)
         if 'solution' in local_vars:
-            return local_vars['solution']
+            sol = local_vars['solution']
+            
+            # --- CRITICAL FIX FOR JSON SERIALIZATION ---
+            # Pandas/NumPy return types (int64, float64) that break JSON.
+            # We convert them to Python native types here.
+            if isinstance(sol, (np.integer, np.floating)):
+                return sol.item()
+            if isinstance(sol, np.ndarray):
+                return sol.tolist()
+            return sol
+            
         else:
             return "Error: Code executed but 'solution' variable was never defined."
     except Exception as e:
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST (UPDATED PROMPT)
+# 3. GEMINI ANALYST
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
@@ -222,23 +230,17 @@ async def analyze_task(deep_context: str, current_url: str):
     
     CRITICAL RULES:
     
-    1. **NO HALLUCINATIONS (Step 1)**:
-       - If the context is empty or simple, DO NOT invent external URLs (like github/raw). 
-       - Just return `solution = "Hello"` or whatever simple text is asked.
+    1. **NO HALLUCINATIONS**:
+       - If context is simple, return simple text.
     
-    2. **CSV HEADER DETECTION (Step 3 - CRITICAL)**:
+    2. **CSV HEADER DETECTION**:
        - Look at the [CSV RAW PREVIEW].
-       - **If the first row looks like data (numbers/values) and NOT text headers:**
-         - YOU MUST USE `header=None` in `pd.read_csv`.
-         - Refer to columns by index: `df[0]`.
-       - **If the first row looks like text headers:**
-         - Use `header=0` (default).
-         - Clean column names: `df.columns = df.columns.str.strip()`.
+       - If no text headers are visible, use `header=None` and index `df[0]`.
+       - If headers exist, use `header=0` and clean them: `df.columns = df.columns.str.strip()`.
     
     3. **AUDIO LOGIC**:
-       - Transcript contains math rules.
+       - Use the transcript logic EXACTLY.
        - "Sum numbers > 50": `df[df[0] > 50].sum()`.
-       - "Sum numbers in first column": `df.iloc[:, 0].sum()`.
     
     4. **Output**: Return ONLY Python code.
     """
