@@ -61,7 +61,6 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
-        # Ask for VERBATIM transcription to capture exact numbers
         prompt = "Transcribe this audio file VERBATIM. Write down every single word. Do not summarize."
         result = model.generate_content([myfile, prompt])
         
@@ -71,9 +70,6 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
         return f"[ERROR TRANSCRIBING MEDIA]: {e}"
 
 def inspect_csv(content: bytes) -> str:
-    """
-    Do NOT parse with Pandas here. Just return the raw text head.
-    """
     try:
         text_val = content.decode('utf-8', errors='ignore')
         head = "\n".join(text_val.splitlines()[:10])
@@ -195,29 +191,27 @@ def execute_generated_code(code_str: str):
         exec(code_str, allowed_globals, local_vars)
         if 'solution' in local_vars:
             sol = local_vars['solution']
-            
-            # --- CRITICAL FIX FOR JSON SERIALIZATION ---
-            # Pandas/NumPy return types (int64, float64) that break JSON.
-            # We convert them to Python native types here.
+            # Serialization Fix
             if isinstance(sol, (np.integer, np.floating)):
                 return sol.item()
             if isinstance(sol, np.ndarray):
                 return sol.tolist()
             return sol
-            
         else:
             return "Error: Code executed but 'solution' variable was never defined."
     except Exception as e:
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST
+# 3. GEMINI ANALYST (STRICT CONTEXT PROMPT)
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
     
     prompt = r"""
     You are an intelligent Data Extraction Agent.
+    
+    I have already crawled the site using a full browser (Playwright) and transcribed audio.
     
     FULL CONTEXT DUMP:
     =========================================
@@ -228,15 +222,18 @@ async def analyze_task(deep_context: str, current_url: str):
     
     TASK: Write a Python script to calculate the `solution`.
     
-    CRITICAL RULES:
+    CRITICAL RULES (READ CAREFULLY):
     
-    1. **NO HALLUCINATIONS**:
-       - If context is simple, return simple text.
+    1. **TRUST THE CONTEXT (DO NOT RE-FETCH)**:
+       - The answer is ALREADY in the context dump above.
+       - **DO NOT** write code to `requests.get()` a URL that is already listed in `=== PAGE TEXT ===`.
+       - If you see "Secret code is 12345" in the logs, just write: `solution = "12345"`.
+       - If you try to `requests.get()` a dynamic page, you will FAIL because `requests` cannot run JS. Use the text I gave you.
     
     2. **CSV HEADER DETECTION**:
        - Look at the [CSV RAW PREVIEW].
-       - If no text headers are visible, use `header=None` and index `df[0]`.
-       - If headers exist, use `header=0` and clean them: `df.columns = df.columns.str.strip()`.
+       - If NO headers: `pd.read_csv(..., header=None)`.
+       - If headers exist: `df.columns = df.columns.str.strip()`.
     
     3. **AUDIO LOGIC**:
        - Use the transcript logic EXACTLY.
