@@ -35,7 +35,7 @@ STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
 
 if not GOOGLE_API_KEY:
-    print("⚠️ WARNING: GOOGLE_API_KEY not found via Env Vars")
+    print("⚠️ WARNING: GOOGLE_API_KEY not found via Env Vars", flush=True)
 
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
@@ -61,27 +61,45 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
+        # Ask for VERBATIM transcription
         prompt = "Transcribe this audio file VERBATIM. Write down every single word. Do not summarize."
         result = model.generate_content([myfile, prompt])
         
         os.unlink(tmp_path)
-        return f"[TRANSCRIPT OF {mime_type}]: {result.text.strip()}"
+        transcript = result.text.strip()
+        
+        # --- NEW: Explicitly print the transcript for the user ---
+        print(f"\n🎤 [AUDIO TRANSCRIPT FOUND]:\n{transcript}\n", flush=True)
+        
+        return f"[TRANSCRIPT OF {mime_type}]: {transcript}"
     except Exception as e:
         return f"[ERROR TRANSCRIBING MEDIA]: {e}"
 
 def inspect_csv(content: bytes) -> str:
+    """
+    NUCLEAR OPTION: Hide data to prevent LLM hardcoding.
+    """
     try:
         text_val = content.decode('utf-8', errors='ignore')
-        head = "\n".join(text_val.splitlines()[:10])
-        return f"[CSV RAW PREVIEW (First 10 lines)]:\n{head}\n[END PREVIEW]"
+        lines = text_val.splitlines()
+        if not lines: return "[CSV ERROR]: Empty file"
+        
+        # We only show the COUNT, not the values.
+        return f"""
+[CSV STRUCTURE DETECTED]
+- Total Rows: {len(lines)}
+- Header Candidate: '{lines[0]}'
+[INSTRUCTION]: Data is hidden. YOU MUST WRITE CODE TO DOWNLOAD AND READ THE FULL FILE using the URL.
+"""
     except Exception as e:
         return f"[CSV ERROR]: {e}"
 
 def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
-    print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}")
+    print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}", flush=True)
     
     extracted_info = ""
     if "audio" in mime_type or "ogg" in mime_type:
+        # Transcript printing happens inside transcribe_media now
         extracted_info = f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, "audio/mp3")
     elif "image" in mime_type:
         extracted_info = f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
@@ -91,10 +109,6 @@ def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
         text_val = content.decode('utf-8', errors='ignore')
         extracted_info = f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
     
-    # --- LOGGING: PRINT EXTRACTED TEXT ---
-    if extracted_info:
-        print(f"\n📄 [EXTRACTED FROM ASSET]:\n{extracted_info[:500]}...\n")
-        
     return extracted_info
 
 async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
@@ -103,7 +117,7 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
     
     visited_urls.add(url)
     prefix = "  " * depth
-    print(f"{prefix}👉 Crawling: {url} (Depth {depth})")
+    print(f"{prefix}👉 Crawling: {url} (Depth {depth})", flush=True)
 
     try:
         try:
@@ -135,8 +149,8 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                 
                 visible_text = await page.inner_text("body")
                 
-                # --- LOGGING: PRINT PAGE TEXT ---
-                print(f"\n📄 [EXTRACTED PAGE TEXT] ({url}):\n{visible_text[:300]}...\n")
+                # Print page text snippet for debugging
+                print(f"\n📄 [PAGE TEXT] ({url}):\n{visible_text[:200]}...\n", flush=True)
                 
                 context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:4000]}")
                 
@@ -156,20 +170,20 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                                 links.append(full_link)
                 
                 await page.close()
-                print(f"{prefix}   ↳ Found {len(links)} links. Recursing...")
+                print(f"{prefix}   ↳ Found {len(links)} links. Recursing...", flush=True)
                 
                 for link in links:
                     await recursive_crawl(link, depth + 1, browser, max_depth)
 
             except Exception as e:
-                print(f"{prefix}⚠️ Error rendering page {url}: {e}")
+                print(f"{prefix}⚠️ Error rendering page {url}: {e}", flush=True)
                 await page.close()
 
     except Exception as e:
-        print(f"{prefix}⚠️ Error crawling {url}: {e}")
+        print(f"{prefix}⚠️ Error crawling {url}: {e}", flush=True)
 
 async def build_complete_context(start_url):
-    print("🕵️ STARTING RECURSIVE CRAWL (Full Browser)...")
+    print("🕵️ STARTING RECURSIVE CRAWL (Full Browser)...", flush=True)
     visited_urls.clear()
     context_log.clear()
     
@@ -184,8 +198,8 @@ async def build_complete_context(start_url):
 # 2. EXECUTION ENGINE
 # ==============================================================================
 def execute_generated_code(code_str: str):
-    print("⚡ Executing Python code...")
-    print(f"--- GENERATED CODE ---\n{code_str}\n----------------------")
+    print("⚡ Executing Python code...", flush=True)
+    print(f"--- GENERATED CODE ---\n{code_str}\n----------------------", flush=True)
     
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
@@ -214,10 +228,10 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST (DEBUGGING PROMPT)
+# 3. GEMINI ANALYST (DEBUG PROMPT)
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
-    print("🧠 Gemini is analyzing the gathered context...")
+    print("🧠 Gemini is analyzing the gathered context...", flush=True)
     
     prompt = r"""
     You are an intelligent Data Extraction Agent.
@@ -233,16 +247,16 @@ async def analyze_task(deep_context: str, current_url: str):
     
     CRITICAL RULES:
     1. **NO HARDCODING**:
-       - The CSV Preview is truncated. YOU MUST download the full file using the URL found in the logs.
-       - `df = pd.read_csv(io.StringIO(requests.get(csv_url).text))`
+       - The CSV Preview HIDES the data.
+       - **YOU MUST** write code to download the file: `df = pd.read_csv(io.StringIO(requests.get(csv_url).text))`
     
     2. **TRUST THE CONTEXT**:
-       - Do not re-fetch HTML pages. Use the text provided above.
-       - If you see "Secret code is X", then `solution = "X"`.
+       - **TEXT**: If page text says "Cutoff: 39529", define `cutoff = 39529`.
+       - **AUDIO**: If transcript says "Sum numbers > cutoff", use `df[df[0] > cutoff].sum()`.
+       - **COMBINE THEM**: Do not ignore the text just because you have audio.
     
-    3. **AUDIO LOGIC**:
-       - "Sum numbers > 50": `df[df[0] > 50].sum()`.
-       - "Sum numbers starting with 9": `df[df[0].astype(str).str.startswith('9')].sum()`
+    3. **CSV LOGIC**:
+       - Use `header=None` if the preview shows no text headers.
     
     4. **Output**: Return ONLY Python code.
     """
@@ -251,16 +265,16 @@ async def analyze_task(deep_context: str, current_url: str):
     final_prompt = prompt.format(deep_context=safe_context, current_url=current_url, email=STUDENT_EMAIL)
 
     # --- LOGGING: PRINT FULL PROMPT ---
-    print("\n📝 [FULL PROMPT SENT TO GEMINI]:")
+    print("\n📝 [FULL PROMPT SENT TO GEMINI]:", flush=True)
     print("="*60)
-    print(final_prompt)
-    print("="*60 + "\n")
+    print(final_prompt[:3000] + "... (truncated for readability)")
+    print("="*60 + "\n", flush=True)
 
     try:
         response = await asyncio.to_thread(model.generate_content, final_prompt)
         return response.text
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        print(f"Gemini Error: {e}", flush=True)
         return ""
 
 def extract_submit_url(text: str, base_url: str):
@@ -278,7 +292,7 @@ async def run_quiz_chain(start_url: str):
     steps = 0
     max_steps = 15 
     
-    print(f"🚀 STARTING QUIZ CHAIN at {start_url}")
+    print(f"🚀 STARTING QUIZ CHAIN at {start_url}", flush=True)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -286,7 +300,7 @@ async def run_quiz_chain(start_url: str):
 
         while current_url and steps < max_steps:
             steps += 1
-            print(f"\n--- STEP {steps}: Visiting {current_url} ---")
+            print(f"\n--- STEP {steps}: Visiting {current_url} ---", flush=True)
 
             try:
                 await page.goto(current_url)
@@ -302,14 +316,14 @@ async def run_quiz_chain(start_url: str):
                 
                 retries = 0
                 while "Error" in str(answer) and retries < 2:
-                    print(f"⚠️ Code failed. Retrying... ({retries+1}/2)")
+                    print(f"⚠️ Code failed. Retrying... ({retries+1}/2)", flush=True)
                     fix_prompt = f"Previous code failed with: {answer}\n\nCode:\n{code}\n\nFIX IT. Initialize all variables."
                     retry_resp = await asyncio.to_thread(model.generate_content, fix_prompt)
                     code = retry_resp.text
                     answer = execute_generated_code(code)
                     retries += 1
                 
-                print(f"💡 Final Answer: {answer}")
+                print(f"💡 Final Answer: {answer}", flush=True)
                 
                 visible_text = await page.inner_text("body")
                 submit_url = extract_submit_url(visible_text, current_url)
@@ -318,7 +332,7 @@ async def run_quiz_chain(start_url: str):
                     if "demo" in current_url:
                          submit_url = "https://tds-llm-analysis.s-anand.net/demo/submit"
                     else:
-                        print("⚠️ FATAL: No submit URL found.")
+                        print("⚠️ FATAL: No submit URL found.", flush=True)
                         break
 
                 payload = {
@@ -328,29 +342,29 @@ async def run_quiz_chain(start_url: str):
                     "answer": answer
                 }
                 
-                print(f"📤 Submitting to {submit_url}...")
+                print(f"📤 Submitting to {submit_url}...", flush=True)
                 response = requests.post(submit_url, json=payload)
                 
                 try:
                     resp_data = response.json()
-                    print(f"✅ Response: {resp_data}")
+                    print(f"✅ Response: {resp_data}", flush=True)
                     
                     if resp_data.get("url"):
                         current_url = resp_data.get("url")
                     else:
-                        print("🏆 QUIZ COMPLETED.")
+                        print("🏆 QUIZ COMPLETED.", flush=True)
                         break
                 except:
-                    print(f"❌ Submission Error: {response.text}")
+                    print(f"❌ Submission Error: {response.text}", flush=True)
                     break
                     
             except Exception as e:
-                print(f"💥 Error: {e}")
+                print(f"💥 Error: {e}", flush=True)
                 traceback.print_exc()
                 break
         
         await browser.close()
-        print("🏁 Agent finished.")
+        print("🏁 Agent finished.", flush=True)
 
 @app.post("/llm-agent")
 async def start_task(payload: TaskPayload, background_tasks: BackgroundTasks):
