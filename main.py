@@ -13,6 +13,9 @@ import base64
 import hashlib
 import mimetypes
 import tempfile
+import csv  # <--- NEW IMPORT
+import random # <--- NEW IMPORT
+import time # <--- NEW IMPORT
 from urllib.parse import urljoin, urlparse 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -43,7 +46,7 @@ class TaskPayload(BaseModel):
     url: str
 
 # ==============================================================================
-# 1. THE RECURSIVE CRAWLER (FULL BROWSER EDITION)
+# 1. THE RECURSIVE CRAWLER
 # ==============================================================================
 
 visited_urls = set()
@@ -79,8 +82,8 @@ def inspect_csv(content: bytes) -> str:
 
 def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
     print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}")
-    if "audio" in mime_type:
-        return f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, mime_type)
+    if "audio" in mime_type or "ogg" in mime_type:
+        return f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, "audio/mp3")
     elif "image" in mime_type:
         return f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
     elif "csv" in mime_type or url.endswith(".csv"):
@@ -91,9 +94,6 @@ def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
     return ""
 
 async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
-    """
-    Async Crawler that uses Playwright for HTML pages to ensure JS execution.
-    """
     if url in visited_urls or depth > max_depth:
         return
     
@@ -109,10 +109,10 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
         except:
             content_type = ""
 
-        is_asset = any(x in content_type for x in ['audio', 'image', 'csv', 'json', 'text/plain'])
+        is_asset = any(x in content_type for x in ['audio', 'image', 'csv', 'json', 'text/plain', 'ogg'])
         is_html = 'html' in content_type
 
-        # --- CASE A: ASSET (Use Requests - Fast) ---
+        # --- CASE A: ASSET ---
         if is_asset or (not is_html and depth > 0): 
             resp = requests.get(url, timeout=10)
             piece_info = process_puzzle_piece(url, content_type, resp.content)
@@ -120,26 +120,26 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                 context_log.append(piece_info)
             return
 
-        # --- CASE B: HTML PAGE (Use Playwright - Slow but Smart) ---
+        # --- CASE B: HTML PAGE ---
         if is_html:
-            # Open a new tab/page to run the JS
             page = await browser.new_page()
             try:
                 await page.goto(url)
+                # INCREASED TIMEOUT TO 10s for slow JS
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=4000)
+                    await page.wait_for_load_state("networkidle", timeout=10000)
                 except:
                     pass
                 
                 # Get rendered text
                 visible_text = await page.inner_text("body")
-                context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:2000]}")
+                context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:4000]}")
                 
                 if depth >= max_depth:
                     await page.close()
                     return
 
-                # Extract Links from DOM
+                # Extract Links
                 html = await page.content()
                 soup = bs4.BeautifulSoup(html, 'html.parser')
                 links = []
@@ -151,11 +151,10 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                             if full_link not in visited_urls:
                                 links.append(full_link)
                 
-                await page.close() # Close tab to free memory
+                await page.close()
                 
                 print(f"{prefix}   ↳ Found {len(links)} links. Recursing...")
                 
-                # RECURSE
                 for link in links:
                     await recursive_crawl(link, depth + 1, browser, max_depth)
 
@@ -173,7 +172,6 @@ async def build_complete_context(start_url):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        # We pass the BROWSER instance to the recursive function
         await recursive_crawl(start_url, 0, browser, max_depth=2)
         await browser.close()
 
@@ -186,11 +184,13 @@ def execute_generated_code(code_str: str):
     print("⚡ Executing Python code...")
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
+    # ADDED CSV, MATH, RANDOM TO GLOBALS
     allowed_globals = {
         "pd": pd, "np": np, "requests": requests, "json": json, "re": re,
         "bs4": bs4, "BeautifulSoup": bs4.BeautifulSoup, "urljoin": urljoin,
         "io": io, "base64": base64, "hashlib": hashlib, "print": print,
-        "genai": genai, "os": os
+        "genai": genai, "os": os,
+        "csv": csv, "random": random, "time": time
     }
     local_vars = {}
 
@@ -212,8 +212,6 @@ async def analyze_task(deep_context: str, current_url: str):
     prompt = r"""
     You are an intelligent Data Extraction Agent.
     
-    I have crawled the site using a full browser, executed all JavaScript, and transcribed all audio.
-    
     FULL CONTEXT DUMP:
     =========================================
     {deep_context}
@@ -227,15 +225,15 @@ async def analyze_task(deep_context: str, current_url: str):
     CRITICAL RULES:
     1. **Puzzle Assembly**:
        - The answer is somewhere in the context above.
-       - If you see "Secret code is X" in the PAGE TEXT logs, `solution = "X"`.
-       - If you see "Sum column X" in AUDIO logs, do that.
+       - **SUB-PAGES**: If you see a sub-page text like "Secret code is 12345", that is the answer.
+       - **AUDIO**: If you see "TRANSCRIPT OF audio", follow those instructions (e.g., "sum column X").
     
     2. **Variable Safety**:
        - Initialize variables. Example: `limit = 0` before checking regex.
        - Always provide a fallback: `solution = "Not Found"`.
     
-    3. **CSV Handling**:
-       - I have provided the CSV headers. You MUST write `requests.get()` to download the full CSV and process it.
+    3. **Imports**:
+       - `csv`, `json`, `random`, `math` are available. You don't need to import them, but you can.
     
     4. **Output**: Return ONLY Python code.
     """
@@ -267,8 +265,6 @@ async def run_quiz_chain(start_url: str):
     
     print(f"🚀 STARTING QUIZ CHAIN at {start_url}")
 
-    # Note: We now launch a SEPARATE browser instance inside recursive_crawl
-    # But for the main loop, we still need one for submitting/navigating.
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -284,7 +280,6 @@ async def run_quiz_chain(start_url: str):
                 except:
                     pass
                 
-                # --- START RECURSIVE CRAWL (Passes URL, creates its own browser) ---
                 deep_context = await build_complete_context(current_url)
                 
                 code = await analyze_task(deep_context, current_url)
@@ -301,7 +296,6 @@ async def run_quiz_chain(start_url: str):
                 
                 print(f"💡 Final Answer: {answer}")
                 
-                # Re-fetch page text for submission link logic
                 visible_text = await page.inner_text("body")
                 submit_url = extract_submit_url(visible_text, current_url)
                 
