@@ -1,10 +1,5 @@
 import sys
 import asyncio
-
-# 0. WINDOWS FIX
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
 import os
 import json
 import traceback
@@ -23,11 +18,16 @@ from playwright.async_api import async_playwright
 import google.generativeai as genai
 
 # ==============================================================================
-# 1. CONFIGURATION
+# 0. CONFIGURATION & SETUP
 # ==============================================================================
+
+# Fix for Windows Event Loop Policy
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 app = FastAPI()
 
-# GET FROM ENVIRONMENT
+# Environment Variables
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 STUDENT_EMAIL = os.environ.get("STUDENT_EMAIL")
 STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
@@ -35,6 +35,7 @@ STUDENT_SECRET = os.environ.get("STUDENT_SECRET")
 if not GOOGLE_API_KEY:
     print("⚠️ WARNING: GOOGLE_API_KEY not found via Env Vars")
 
+# Configure Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 
@@ -44,12 +45,14 @@ class TaskPayload(BaseModel):
     url: str
 
 # ==============================================================================
-# 2. EXECUTION HANDS
+# 1. EXECUTION ENGINE (SANDBOX)
 # ==============================================================================
 def execute_generated_code(code_str: str):
     print("⚡ Executing Python code...")
+    # Clean up markdown formatting if present
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
+    # Define the environment for the generated code
     allowed_globals = {
         "pd": pd,
         "np": np,
@@ -76,98 +79,55 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI BRAIN (CRASH PROOF EDITION)
+# 2. GEMINI ANALYSIS (THE BRAIN)
 # ==============================================================================
-async def analyze_task(page_text: str, current_url: str):
+async def analyze_task(context_block: str, current_url: str):
     print("🧠 Gemini is thinking...")
     
-    # RAW STRING
     prompt = r"""
     You are an automated Data Analyst Agent.
     
     CURRENT URL: {current_url}
     MY EMAIL: {email}
-    INPUT TEXT FROM WEBPAGE:
-    {page_text}
+    
+    PAGE CONTEXT:
+    {context_block}
     
     YOUR GOAL: Write a Python script to solve the task.
     
-    CRITICAL INSTRUCTIONS:
-    1. **INITIALIZE VARIABLES (MANDATORY):** - Start the script EXACTLY like this:
+    CRITICAL RULES (FOLLOW THESE OR YOU WILL FAIL):
+    
+    1. **INITIALIZATION:**
+       - ALWAYS start with:
          `solution = "Not Found"`
          `target = '{current_url}'`
-         `limit = None`
+       
+    2. **HANDLING HIDDEN DATA (Step 2 - Client Side):**
+       - Look at the 'DETECTED SCRIPTS' section in the context.
+       - If the page text is empty or cryptic, the secret is likely inside a JS file.
+       - **YOU MUST** write code to `requests.get()` these script URLs using `urljoin(target, script_url)`.
+       - Check the script content for "var code =", "const secret =", or dynamic logic like "sha1(email)".
+       - If you see hashing (SHA-256, SHA-1), implement it in Python using `hashlib`. DO NOT try to execute JS.
     
-    2. **SCENARIO A: "Scrape /path"**
-       - Code pattern:
-         `match = re.search(r'Scrape\s+([^\s]+)', r'{page_text}')`
-         `if match:`
-         `    target = urljoin('{current_url}', match.group(1))`
-         `    print(f"DEBUG: Fetching {{target}}")`
-         `    resp = requests.get(target, headers={{'User-Agent': 'Mozilla/5.0'}})`
-         `    # 1. Try JSON`
-         `    try: solution = resp.json()['message']`
-         `    except: pass`
-         `    # 2. Script Hunter`
-         `    if solution == "Not Found":`
-         `        soup = BeautifulSoup(resp.text, 'html.parser')`
-         `        # USE 'target' variable (Safe)`
-         `        scripts = [urljoin(target, s['src']) for s in soup.find_all('script', src=True)]`
-         `        imports = re.findall(r'from\s+[\"\']\./([^\"\']+)[\"\']', resp.text)`
-         `        for i in imports: scripts.append(urljoin(target, i))`
-         `        `
-         `        for js_url in scripts:`
-         `            try:`
-         `                js_text = requests.get(js_url).text`
-         `                # NESTED IMPORTS`
-         `                nested = re.findall(r'from\s+[\"\']\./([^\"\']+)[\"\']', js_text)`
-         `                for n in nested:`
-         `                     js_text += "\n" + requests.get(urljoin(js_url, n)).text`
-         `                `
-         `                print(f"DEBUG: JS Analysis on {{len(js_text)}} chars")`
-         `                # LOGIC HUNTER: SHA1 / EMAIL`
-         `                if "sha1(email)" in js_text or "crypto.subtle" in js_text:`
-         `                    print("DEBUG: Found SHA1 logic. Calculating locally.")`
-         `                    import hashlib`
-         `                    # Logic: parseInt(sha1(email).slice(0, 4), 16)`
-         `                    hash_obj = hashlib.sha1('{email}'.encode())`
-         `                    hex_dig = hash_obj.hexdigest()`
-         `                    solution = int(hex_dig[:4], 16)`
-         `                    break`
-         `                `
-         `                # VARIABLE HUNTER`
-         `                if solution == "Not Found":`
-         `                    var_match = re.search(r'(?:const|let|var)\s+\w+\s*=\s*[\"\']([a-zA-Z0-9]+)[\"\']', js_text)`
-         `                    if var_match: solution = var_match.group(1)`
-         `            except: pass`
+    3. **HANDLING FILES (Step 3 - Data Analysis):**
+       - Look at the 'DETECTED LINKS' section.
+       - IF you see a link ending in .csv, .pdf, .json, or .txt:
+         a. **YOU MUST** write `requests.get(link_url)` to download it.
+         b. **YOU MUST** use `io.StringIO` (for CSV/Text) or `io.BytesIO` (for PDF/Excel) to read it.
+         c. **DO NOT** assume you know the file content. You must read the file.
+       - If filtering numbers: `nums = [n for n in nums if n > limit]` (Be careful with strict inequality vs inclusive).
     
-    3. **SCENARIO B: "CSV" or "Download"**
-       - Code pattern:
-         `resp = requests.get('{current_url}')`
-         `soup = BeautifulSoup(resp.content, 'html.parser')`
-         `link = soup.find('a', string=re.compile(r'CSV|Download', re.I))`
-         `if link:`
-         `    d_url = urljoin('{current_url}', link['href'])`
-         `    print(f"DEBUG: Downloading {{d_url}}")`
-         `    content = requests.get(d_url).text`
-         `    nums = [int(n) for n in re.findall(r'-?\d+', content)]`
-         `    if "Cutoff" in r'{page_text}':`
-         `        cutoff_match = re.search(r'Cutoff:\s*(\d+)', r'{page_text}')`
-         `        if cutoff_match:`
-         `             limit = int(cutoff_match.group(1))`
-         `    # SAFE FILTERING: Only filter if limit was actually found`
-         `    if limit is not None:`
-         `         nums = [n for n in nums if n > limit]`
-         `    solution = sum(nums)`
-         
-    4. **SCENARIO C: Simple Answer**
-       - If text says "answer": `solution = "anything you want"`
-    
-    5. **OUTPUT:** Output ONLY the Python code.
+    4. **GENERAL:**
+       - Use `requests` to fetch data.
+       - Use `bs4` (BeautifulSoup) for HTML parsing.
+       - Use `pd` (pandas) for heavy data, or `re` (regex) for simple extraction.
+       - **Output ONLY the Python code.** No markdown, no explanation.
     """
     
-    safe_page_text = page_text.replace('{', '{{').replace('}', '}}').replace("'", "")
-    final_prompt = prompt.format(current_url=current_url, page_text=safe_page_text, email=STUDENT_EMAIL)
+    # Safety: Escape braces in the context to prevent .format() from crashing on JS code
+    safe_context = context_block.replace('{', '{{').replace('}', '}}').replace("'", "")
+    
+    final_prompt = prompt.format(current_url=current_url, context_block=safe_context, email=STUDENT_EMAIL)
 
     try:
         response = await asyncio.to_thread(model.generate_content, final_prompt)
@@ -184,7 +144,7 @@ def extract_submit_url(text: str, base_url: str):
     return None
 
 # ==============================================================================
-# 4. AGENT LOOP
+# 3. AGENT LOOP (THE BODY)
 # ==============================================================================
 async def run_quiz_chain(start_url: str):
     current_url = start_url
@@ -208,14 +168,72 @@ async def run_quiz_chain(start_url: str):
                 except:
                     pass
                 
-                page_text = await page.inner_text("body")
-                print(f"📄 RAW TEXT SEEN:\n{page_text[:300]}...\n[...]\n")
-
-                code = await analyze_task(page_text, current_url)
-                answer = execute_generated_code(code)
-                print(f"💡 Calculated Answer: {answer}")
+                # --- [CRITICAL FIX 1] EXTRACT CONTEXT LOCALLY ---
+                # We do this HERE so Gemini doesn't have to guess where the scripts are.
+                html_content = await page.content()
+                visible_text = await page.inner_text("body")
                 
-                submit_url = extract_submit_url(page_text, current_url)
+                soup = bs4.BeautifulSoup(html_content, 'html.parser')
+                
+                # Extract Script URLs (recursively useful for Step 2)
+                scripts = []
+                for s in soup.find_all('script'):
+                    src = s.get('src')
+                    if src:
+                        scripts.append(urljoin(current_url, src))
+                
+                # Extract Links (useful for Step 3 CSVs)
+                links = []
+                for a in soup.find_all('a'):
+                    href = a.get('href')
+                    if href:
+                        links.append(urljoin(current_url, href))
+
+                # Build the Context Block
+                context_block = f"""
+                VISIBLE TEXT ON PAGE:
+                {visible_text[:2000]}
+                
+                DETECTED SCRIPTS (Might contain the secret):
+                {json.dumps(scripts, indent=2)}
+                
+                DETECTED LINKS (Might be data files):
+                {json.dumps(links, indent=2)}
+                """
+                
+                print(f"🔎 Context Extracted: {len(scripts)} scripts, {len(links)} links.")
+                
+                # --- ANALYZE ---
+                code = await analyze_task(context_block, current_url)
+                answer = execute_generated_code(code)
+                
+                # --- [CRITICAL FIX 2] RETRY LOOP ---
+                # If the code crashes (NameError, SyntaxError, etc), we give Gemini ONE chance to fix it.
+                retries = 0
+                while "Error" in str(answer) and retries < 1:
+                    print(f"⚠️ Code failed. Asking Gemini to fix... (Error: {str(answer)[:100]}...)")
+                    
+                    fix_prompt = f"""
+                    The previous code you wrote failed.
+                    
+                    THE CODE:
+                    {code}
+                    
+                    THE ERROR:
+                    {answer}
+                    
+                    TASK: Fix the code. Initialize all variables. Handle the error. Output ONLY Python.
+                    """
+                    
+                    retry_resp = await asyncio.to_thread(model.generate_content, fix_prompt)
+                    code = retry_resp.text
+                    answer = execute_generated_code(code)
+                    retries += 1
+                
+                print(f"💡 Final Answer: {answer}")
+                
+                # --- SUBMISSION LOGIC ---
+                submit_url = extract_submit_url(visible_text, current_url)
                 
                 if not submit_url:
                     if "demo" in current_url and "submit" not in current_url:
@@ -262,6 +280,9 @@ async def run_quiz_chain(start_url: str):
         await browser.close()
         print("🏁 Agent finished.")
 
+# ==============================================================================
+# 4. API SERVER
+# ==============================================================================
 @app.post("/llm-agent")
 async def start_task(payload: TaskPayload, background_tasks: BackgroundTasks):
     if payload.secret != STUDENT_SECRET:
@@ -271,5 +292,5 @@ async def start_task(payload: TaskPayload, background_tasks: BackgroundTasks):
 
 if __name__ == "__main__":
     import uvicorn
-    # Use 0.0.0.0 to allow external access
+    # Use 0.0.0.0 to allow external access (Required for Render/Docker)
     uvicorn.run(app, host="0.0.0.0", port=8000)
