@@ -61,8 +61,8 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
-        # UPDATED PROMPT: Ask specifically for math/logic instructions
-        prompt = "Listen carefully. Does the audio mention a COLUMN NAME? Does it mention a FILTER (e.g. 'greater than', 'ends with')? Output the exact math instruction."
+        # UPDATED: Ask for VERBATIM transcription to capture exact numbers
+        prompt = "Transcribe this audio file VERBATIM. Write down every single word spoken. Do not summarize."
         result = model.generate_content([myfile, prompt])
         
         os.unlink(tmp_path)
@@ -178,6 +178,8 @@ async def build_complete_context(start_url):
 # ==============================================================================
 def execute_generated_code(code_str: str):
     print("⚡ Executing Python code...")
+    print(f"--- GENERATED CODE ---\n{code_str}\n----------------------") # DEBUG PRINT
+    
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
     allowed_globals = {
@@ -199,7 +201,7 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST (UPDATED PROMPT)
+# 3. GEMINI ANALYST
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
@@ -216,22 +218,21 @@ async def analyze_task(deep_context: str, current_url: str):
     
     TASK: Write a Python script to calculate the `solution`.
     
-    CRITICAL RULES (READ CAREFULLY):
+    CRITICAL RULES:
     
-    1. **AUDIO LOGIC (CRITICAL)**:
-       - The audio transcript contains the MATH INSTRUCTIONS.
-       - If it says "sum numbers greater than 50", you MUST filter: `df[df[col] > 50]`.
-       - If it says "sum numbers *starting with* 9", convert to string and filter.
-       - **Do NOT just sum the whole file unless explicitly told to.**
+    1. **AUDIO INSTRUCTIONS**:
+       - The audio transcript contains the EXACT logic.
+       - "Sum numbers greater than X" -> `df[df[col] > X].sum()`
+       - "Sum numbers starting with 5" -> `df[df[col].astype(str).str.startswith('5')].sum()`
+       - **Pay attention to 'Greater than OR EQUAL' (>=) vs 'Greater than' (>)**.
     
-    2. **CSV HANDLING**:
-       - You must write code to download the CSV: `df = pd.read_csv(io.StringIO(requests.get(url).text))`
-       - **Check Headers**: If the audio specifies a column name (e.g., "value") but the CSV has no headers, reload with `header=None` and use index (e.g., `df[0]`).
-       - **Clean Data**: If the column contains non-numeric text, force coerce: `pd.to_numeric(df['col'], errors='coerce')`.
+    2. **CSV SAFETY (CRITICAL)**:
+       - `df = pd.read_csv(...)`
+       - **STRIP HEADERS**: `df.columns = df.columns.str.strip()` (Removes spaces like " value ").
+       - **FORCE NUMERIC**: `df['value'] = pd.to_numeric(df['value'], errors='coerce')`
     
     3. **General**:
-       - Initialize variables (`limit`, `col_name`) to safe defaults.
-       - Always provide a `solution`.
+       - Initialize variables.
        - Output ONLY Python code.
     """
     
