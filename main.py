@@ -61,8 +61,8 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
-        # UPDATED: Ask for VERBATIM transcription to capture exact numbers
-        prompt = "Transcribe this audio file VERBATIM. Write down every single word spoken. Do not summarize."
+        # Ask for VERBATIM transcription to capture exact numbers/logic
+        prompt = "Transcribe this audio file VERBATIM. Write down every single word. Do not summarize."
         result = model.generate_content([myfile, prompt])
         
         os.unlink(tmp_path)
@@ -71,13 +71,15 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
         return f"[ERROR TRANSCRIBING MEDIA]: {e}"
 
 def inspect_csv(content: bytes) -> str:
+    """
+    CRITICAL FIX: Do NOT parse with Pandas here. 
+    Just return the raw text head so the LLM can decide if there are headers.
+    """
     try:
         text_val = content.decode('utf-8', errors='ignore')
-        try:
-            df = pd.read_csv(io.StringIO(text_val))
-        except:
-            df = pd.read_csv(io.StringIO(text_val), sep=None, engine='python')
-        return f"[CSV STRUCTURE]: Columns={list(df.columns)}, First Row={df.iloc[0].to_dict()}"
+        # Return first 10 lines only
+        head = "\n".join(text_val.splitlines()[:10])
+        return f"[CSV RAW PREVIEW (First 10 lines)]:\n{head}\n[END PREVIEW]"
     except Exception as e:
         return f"[CSV ERROR]: {e}"
 
@@ -178,7 +180,7 @@ async def build_complete_context(start_url):
 # ==============================================================================
 def execute_generated_code(code_str: str):
     print("⚡ Executing Python code...")
-    print(f"--- GENERATED CODE ---\n{code_str}\n----------------------") # DEBUG PRINT
+    print(f"--- GENERATED CODE ---\n{code_str}\n----------------------")
     
     code_str = code_str.replace("```python", "").replace("```", "").strip()
     
@@ -201,7 +203,7 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST
+# 3. GEMINI ANALYST (UPDATED PROMPT)
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
@@ -220,20 +222,25 @@ async def analyze_task(deep_context: str, current_url: str):
     
     CRITICAL RULES:
     
-    1. **AUDIO INSTRUCTIONS**:
-       - The audio transcript contains the EXACT logic.
-       - "Sum numbers greater than X" -> `df[df[col] > X].sum()`
-       - "Sum numbers starting with 5" -> `df[df[col].astype(str).str.startswith('5')].sum()`
-       - **Pay attention to 'Greater than OR EQUAL' (>=) vs 'Greater than' (>)**.
+    1. **NO HALLUCINATIONS (Step 1)**:
+       - If the context is empty or simple, DO NOT invent external URLs (like github/raw). 
+       - Just return `solution = "Hello"` or whatever simple text is asked.
     
-    2. **CSV SAFETY (CRITICAL)**:
-       - `df = pd.read_csv(...)`
-       - **STRIP HEADERS**: `df.columns = df.columns.str.strip()` (Removes spaces like " value ").
-       - **FORCE NUMERIC**: `df['value'] = pd.to_numeric(df['value'], errors='coerce')`
+    2. **CSV HEADER DETECTION (Step 3 - CRITICAL)**:
+       - Look at the [CSV RAW PREVIEW].
+       - **If the first row looks like data (numbers/values) and NOT text headers:**
+         - YOU MUST USE `header=None` in `pd.read_csv`.
+         - Refer to columns by index: `df[0]`.
+       - **If the first row looks like text headers:**
+         - Use `header=0` (default).
+         - Clean column names: `df.columns = df.columns.str.strip()`.
     
-    3. **General**:
-       - Initialize variables.
-       - Output ONLY Python code.
+    3. **AUDIO LOGIC**:
+       - Transcript contains math rules.
+       - "Sum numbers > 50": `df[df[0] > 50].sum()`.
+       - "Sum numbers in first column": `df.iloc[:, 0].sum()`.
+    
+    4. **Output**: Return ONLY Python code.
     """
     
     safe_context = deep_context.replace('{', '{{').replace('}', '}}').replace("'", "")
