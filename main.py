@@ -111,10 +111,10 @@ async def analyze_task(page_text: str, current_url: str):
          `    # 2. Script Hunter`
          `    if solution == "Not Found":`
          `        soup = BeautifulSoup(resp.text, 'html.parser')`
-         `        # USE resp.url to resolve relative links safely`
-         `        scripts = [urljoin(resp.url, s['src']) for s in soup.find_all('script', src=True)]`
+         `        # USE 'target' variable (Safe)`
+         `        scripts = [urljoin(target, s['src']) for s in soup.find_all('script', src=True)]`
          `        imports = re.findall(r'from\s+[\"\']\./([^\"\']+)[\"\']', resp.text)`
-         `        for i in imports: scripts.append(urljoin(resp.url, i))`
+         `        for i in imports: scripts.append(urljoin(target, i))`
          `        `
          `        for js_url in scripts:`
          `            try:`
