@@ -79,16 +79,23 @@ def inspect_csv(content: bytes) -> str:
 
 def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
     print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}")
+    
+    extracted_info = ""
     if "audio" in mime_type or "ogg" in mime_type:
-        return f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, "audio/mp3")
+        extracted_info = f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, "audio/mp3")
     elif "image" in mime_type:
-        return f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
+        extracted_info = f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
     elif "csv" in mime_type or url.endswith(".csv"):
-        return f"--- CSV DATA ({url}) ---\n" + inspect_csv(content)
+        extracted_info = f"--- CSV DATA ({url}) ---\n" + inspect_csv(content)
     elif "json" in mime_type or "text" in mime_type:
         text_val = content.decode('utf-8', errors='ignore')
-        return f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
-    return ""
+        extracted_info = f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
+    
+    # --- LOGGING: PRINT EXTRACTED TEXT ---
+    if extracted_info:
+        print(f"\n📄 [EXTRACTED FROM ASSET]:\n{extracted_info[:500]}...\n")
+        
+    return extracted_info
 
 async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
     if url in visited_urls or depth > max_depth:
@@ -127,6 +134,10 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                     pass
                 
                 visible_text = await page.inner_text("body")
+                
+                # --- LOGGING: PRINT PAGE TEXT ---
+                print(f"\n📄 [EXTRACTED PAGE TEXT] ({url}):\n{visible_text[:300]}...\n")
+                
                 context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:4000]}")
                 
                 if depth >= max_depth:
@@ -203,15 +214,13 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST (STRICT CONTEXT PROMPT)
+# 3. GEMINI ANALYST (DEBUGGING PROMPT)
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...")
     
     prompt = r"""
     You are an intelligent Data Extraction Agent.
-    
-    I have already crawled the site using a full browser (Playwright) and transcribed audio.
     
     FULL CONTEXT DUMP:
     =========================================
@@ -222,28 +231,30 @@ async def analyze_task(deep_context: str, current_url: str):
     
     TASK: Write a Python script to calculate the `solution`.
     
-    CRITICAL RULES (READ CAREFULLY):
+    CRITICAL RULES:
+    1. **NO HARDCODING**:
+       - The CSV Preview is truncated. YOU MUST download the full file using the URL found in the logs.
+       - `df = pd.read_csv(io.StringIO(requests.get(csv_url).text))`
     
-    1. **TRUST THE CONTEXT (DO NOT RE-FETCH)**:
-       - The answer is ALREADY in the context dump above.
-       - **DO NOT** write code to `requests.get()` a URL that is already listed in `=== PAGE TEXT ===`.
-       - If you see "Secret code is 12345" in the logs, just write: `solution = "12345"`.
-       - If you try to `requests.get()` a dynamic page, you will FAIL because `requests` cannot run JS. Use the text I gave you.
-    
-    2. **CSV HEADER DETECTION**:
-       - Look at the [CSV RAW PREVIEW].
-       - If NO headers: `pd.read_csv(..., header=None)`.
-       - If headers exist: `df.columns = df.columns.str.strip()`.
+    2. **TRUST THE CONTEXT**:
+       - Do not re-fetch HTML pages. Use the text provided above.
+       - If you see "Secret code is X", then `solution = "X"`.
     
     3. **AUDIO LOGIC**:
-       - Use the transcript logic EXACTLY.
        - "Sum numbers > 50": `df[df[0] > 50].sum()`.
+       - "Sum numbers starting with 9": `df[df[0].astype(str).str.startswith('9')].sum()`
     
     4. **Output**: Return ONLY Python code.
     """
     
     safe_context = deep_context.replace('{', '{{').replace('}', '}}').replace("'", "")
     final_prompt = prompt.format(deep_context=safe_context, current_url=current_url, email=STUDENT_EMAIL)
+
+    # --- LOGGING: PRINT FULL PROMPT ---
+    print("\n📝 [FULL PROMPT SENT TO GEMINI]:")
+    print("="*60)
+    print(final_prompt)
+    print("="*60 + "\n")
 
     try:
         response = await asyncio.to_thread(model.generate_content, final_prompt)
