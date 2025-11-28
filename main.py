@@ -43,10 +43,9 @@ class TaskPayload(BaseModel):
     url: str
 
 # ==============================================================================
-# 1. THE RECURSIVE CRAWLER (The "Puzzle Collector")
+# 1. THE RECURSIVE CRAWLER (FULL BROWSER EDITION)
 # ==============================================================================
 
-# Global sets to track state during a single request
 visited_urls = set()
 context_log = []
 
@@ -68,149 +67,117 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
         return f"[ERROR TRANSCRIBING MEDIA]: {e}"
 
 def inspect_csv(content: bytes) -> str:
-    """Peeks at a CSV to get columns and first row."""
     try:
         text_val = content.decode('utf-8', errors='ignore')
-        # Handle potential separator issues automatically
         try:
             df = pd.read_csv(io.StringIO(text_val))
         except:
             df = pd.read_csv(io.StringIO(text_val), sep=None, engine='python')
-            
         return f"[CSV STRUCTURE]: Columns={list(df.columns)}, First Row={df.iloc[0].to_dict()}"
     except Exception as e:
         return f"[CSV ERROR]: {e}"
 
 def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
-    """Converts a raw asset (Audio/Image/CSV) into text context."""
     print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}")
-    
     if "audio" in mime_type:
         return f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, mime_type)
-    
     elif "image" in mime_type:
         return f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
-    
     elif "csv" in mime_type or url.endswith(".csv"):
         return f"--- CSV DATA ({url}) ---\n" + inspect_csv(content)
-    
     elif "json" in mime_type or "text" in mime_type:
         text_val = content.decode('utf-8', errors='ignore')
         return f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
-    
     return ""
 
-def recursive_crawl(url: str, depth: int, max_depth: int = 2):
+async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
     """
-    The Core Logic:
-    1. Visit URL.
-    2. Identify if it's a Page (Door) or Asset (Piece).
-    3. If Page: Open it, look for links, and RECURSE.
-    4. If Asset: Process it and add to context.
+    Async Crawler that uses Playwright for HTML pages to ensure JS execution.
     """
     if url in visited_urls or depth > max_depth:
         return
     
     visited_urls.add(url)
-    prefix = "  " * depth # Indentation for logs
+    prefix = "  " * depth
     print(f"{prefix}👉 Crawling: {url} (Depth {depth})")
 
     try:
-        # 1. HEAD Request to Sniff Type
+        # 1. HEAD Request (Fast Sniff)
         try:
             head = requests.head(url, timeout=5, allow_redirects=True)
             content_type = head.headers.get("Content-Type", "").lower()
         except:
-            # Fallback to GET if HEAD fails
             content_type = ""
 
-        # 2. Decision Logic
         is_asset = any(x in content_type for x in ['audio', 'image', 'csv', 'json', 'text/plain'])
         is_html = 'html' in content_type
 
-        # --- CASE A: IT IS A PUZZLE PIECE (ASSET) ---
+        # --- CASE A: ASSET (Use Requests - Fast) ---
         if is_asset or (not is_html and depth > 0): 
-            # (If we are deep and it's not HTML, assume it's data)
             resp = requests.get(url, timeout=10)
             piece_info = process_puzzle_piece(url, content_type, resp.content)
             if piece_info:
                 context_log.append(piece_info)
             return
 
-        # --- CASE B: IT IS A DOOR (HTML PAGE) ---
+        # --- CASE B: HTML PAGE (Use Playwright - Slow but Smart) ---
         if is_html:
-            resp = requests.get(url, timeout=10)
-            soup = bs4.BeautifulSoup(resp.content, 'html.parser')
-            
-            # Clean text extraction
-            for script in soup(["script", "style"]):
-                script.decompose()
-            clean_text = soup.get_text(separator=' ', strip=True)
-            
-            context_log.append(f"=== PAGE TEXT ({url}) ===\n{clean_text[:2000]}")
-            
-            # Stop recursion if we hit max depth
-            if depth >= max_depth:
-                return
+            # Open a new tab/page to run the JS
+            page = await browser.new_page()
+            try:
+                await page.goto(url)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=4000)
+                except:
+                    pass
+                
+                # Get rendered text
+                visible_text = await page.inner_text("body")
+                context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:2000]}")
+                
+                if depth >= max_depth:
+                    await page.close()
+                    return
 
-            # Find all links to recurse
-            links = []
-            for tag in soup.find_all(['a', 'script', 'img', 'source']):
-                href = tag.get('href') or tag.get('src')
-                if href:
-                    full_link = urljoin(url, href)
-                    # Filter: Only crawl internal links to keep it safe/fast
-                    if "s-anand.net" in full_link or "localhost" in full_link:
-                         # Heuristic: Don't re-crawl the base URL
-                        if full_link not in visited_urls:
-                            links.append(full_link)
-            
-            print(f"{prefix}   ↳ Found {len(links)} links. diving deeper...")
-            
-            # RECURSE
-            for link in links:
-                recursive_crawl(link, depth + 1, max_depth)
+                # Extract Links from DOM
+                html = await page.content()
+                soup = bs4.BeautifulSoup(html, 'html.parser')
+                links = []
+                for tag in soup.find_all(['a', 'script', 'img', 'source', 'audio']):
+                    href = tag.get('href') or tag.get('src')
+                    if href:
+                        full_link = urljoin(url, href)
+                        if "s-anand.net" in full_link or "localhost" in full_link:
+                            if full_link not in visited_urls:
+                                links.append(full_link)
+                
+                await page.close() # Close tab to free memory
+                
+                print(f"{prefix}   ↳ Found {len(links)} links. Recursing...")
+                
+                # RECURSE
+                for link in links:
+                    await recursive_crawl(link, depth + 1, browser, max_depth)
+
+            except Exception as e:
+                print(f"{prefix}⚠️ Error rendering page {url}: {e}")
+                await page.close()
 
     except Exception as e:
         print(f"{prefix}⚠️ Error crawling {url}: {e}")
 
-async def build_complete_context(page, start_url):
-    """
-    Initializes the recursive crawl starting from the Playwright page.
-    """
-    print("🕵️ STARTING RECURSIVE CRAWL...")
-    
-    # Reset Globals
+async def build_complete_context(start_url):
+    print("🕵️ STARTING RECURSIVE CRAWL (Full Browser)...")
     visited_urls.clear()
     context_log.clear()
     
-    # 1. Process the Start Page (Level 0) via Playwright (to catch JS-rendered links)
-    html = await page.content()
-    soup = bs4.BeautifulSoup(html, 'html.parser')
-    
-    # Add Level 0 Text
-    visible_text = await page.inner_text("body")
-    context_log.append(f"=== START PAGE TEXT ({start_url}) ===\n{visible_text[:3000]}")
-    visited_urls.add(start_url)
-    
-    # Extract Level 0 Links
-    initial_links = []
-    for tag in soup.find_all(['a', 'script', 'img', 'source']):
-        href = tag.get('href') or tag.get('src')
-        if href:
-            full = urljoin(start_url, href)
-            if "s-anand.net" in full or "localhost" in full:
-                initial_links.append(full)
-    
-    print(f"🔎 Root Page has {len(initial_links)} links. Starting recursion...")
-    
-    # 2. Trigger Recursion for all found links
-    for link in initial_links:
-        # We start at depth 1
-        recursive_crawl(link, depth=1, max_depth=2)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        # We pass the BROWSER instance to the recursive function
+        await recursive_crawl(start_url, 0, browser, max_depth=2)
+        await browser.close()
 
     return "\n\n".join(context_log)
-
 
 # ==============================================================================
 # 2. EXECUTION ENGINE
@@ -245,7 +212,7 @@ async def analyze_task(deep_context: str, current_url: str):
     prompt = r"""
     You are an intelligent Data Extraction Agent.
     
-    I have performed a recursive crawl of the website, downloading and transcribing all assets (Audio, CSV, Images) found at any level.
+    I have crawled the site using a full browser, executed all JavaScript, and transcribed all audio.
     
     FULL CONTEXT DUMP:
     =========================================
@@ -258,14 +225,14 @@ async def analyze_task(deep_context: str, current_url: str):
     TASK: Write a Python script to calculate the `solution`.
     
     CRITICAL RULES:
-    1. **Puzzle Assembly**: The answer is likely scattered. 
-       - Look for "Instructions" in AUDIO transcripts.
-       - Look for "Data" in CSV STRUCTURE blocks.
-       - Look for "Secrets" in PAGE TEXT blocks.
+    1. **Puzzle Assembly**:
+       - The answer is somewhere in the context above.
+       - If you see "Secret code is X" in the PAGE TEXT logs, `solution = "X"`.
+       - If you see "Sum column X" in AUDIO logs, do that.
     
     2. **Variable Safety**:
-       - You MUST initialize variables. If the audio transcript says "Sum column 'value'", define `col_name = 'value'`.
-       - Always provide a fallback: `solution = "Not Found"` at the top.
+       - Initialize variables. Example: `limit = 0` before checking regex.
+       - Always provide a fallback: `solution = "Not Found"`.
     
     3. **CSV Handling**:
        - I have provided the CSV headers. You MUST write `requests.get()` to download the full CSV and process it.
@@ -300,6 +267,8 @@ async def run_quiz_chain(start_url: str):
     
     print(f"🚀 STARTING QUIZ CHAIN at {start_url}")
 
+    # Note: We now launch a SEPARATE browser instance inside recursive_crawl
+    # But for the main loop, we still need one for submitting/navigating.
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
@@ -315,8 +284,8 @@ async def run_quiz_chain(start_url: str):
                 except:
                     pass
                 
-                # --- START RECURSIVE CRAWL ---
-                deep_context = await build_complete_context(page, current_url)
+                # --- START RECURSIVE CRAWL (Passes URL, creates its own browser) ---
+                deep_context = await build_complete_context(current_url)
                 
                 code = await analyze_task(deep_context, current_url)
                 answer = execute_generated_code(code)
@@ -332,6 +301,7 @@ async def run_quiz_chain(start_url: str):
                 
                 print(f"💡 Final Answer: {answer}")
                 
+                # Re-fetch page text for submission link logic
                 visible_text = await page.inner_text("body")
                 submit_url = extract_submit_url(visible_text, current_url)
                 
