@@ -46,30 +46,35 @@ class TaskPayload(BaseModel):
     url: str
 
 # ==============================================================================
-# 1. THE RECURSIVE CRAWLER
+# 1. THE RECURSIVE CRAWLER (With Video & Audio Support)
 # ==============================================================================
 
 visited_urls = set()
 context_log = []
 
 def transcribe_media(content: bytes, mime_type: str) -> str:
-    """Uploads media to Gemini and gets a description."""
+    """Uploads media (Audio/Video/Image) to Gemini and gets a description."""
     try:
-        suffix = ".mp3" if "audio" in mime_type else ".png"
+        # Smart extension guessing for Gemini
+        suffix = ".mp3"
+        if "image" in mime_type: suffix = ".png"
+        if "video" in mime_type: suffix = ".mp4"
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
         
         myfile = genai.upload_file(tmp_path)
+        
         # Ask for VERBATIM transcription
-        prompt = "Transcribe this audio file VERBATIM. Write down every single word. Do not summarize."
+        prompt = "Transcribe this file VERBATIM. Write down every single word. Do not summarize. If there are visual/text instructions in the video/image, write them down exactly."
         result = model.generate_content([myfile, prompt])
         
         os.unlink(tmp_path)
         transcript = result.text.strip()
         
-        # --- NEW: Explicitly print the transcript for the user ---
-        print(f"\n🎤 [AUDIO TRANSCRIPT FOUND]:\n{transcript}\n", flush=True)
+        # --- LOGGING ---
+        print(f"\n🎤 [MEDIA TRANSCRIPT FOUND]:\n{transcript}\n", flush=True)
         
         return f"[TRANSCRIPT OF {mime_type}]: {transcript}"
     except Exception as e:
@@ -98,13 +103,19 @@ def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
     print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}", flush=True)
     
     extracted_info = ""
+    # AUDIO
     if "audio" in mime_type or "ogg" in mime_type:
-        # Transcript printing happens inside transcribe_media now
         extracted_info = f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, "audio/mp3")
+    # VIDEO
+    elif "video" in mime_type or "mp4" in mime_type:
+        extracted_info = f"--- VIDEO FILE ({url}) ---\n" + transcribe_media(content, "video/mp4")
+    # IMAGE
     elif "image" in mime_type:
         extracted_info = f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
+    # CSV
     elif "csv" in mime_type or url.endswith(".csv"):
         extracted_info = f"--- CSV DATA ({url}) ---\n" + inspect_csv(content)
+    # TEXT/JSON
     elif "json" in mime_type or "text" in mime_type:
         text_val = content.decode('utf-8', errors='ignore')
         extracted_info = f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
@@ -120,13 +131,15 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
     print(f"{prefix}👉 Crawling: {url} (Depth {depth})", flush=True)
 
     try:
+        # 1. HEAD Sniffing
         try:
             head = requests.head(url, timeout=5, allow_redirects=True)
             content_type = head.headers.get("Content-Type", "").lower()
         except:
             content_type = ""
 
-        is_asset = any(x in content_type for x in ['audio', 'image', 'csv', 'json', 'text/plain', 'ogg'])
+        # Updated Asset Check (Includes Video)
+        is_asset = any(x in content_type for x in ['audio', 'image', 'video', 'csv', 'json', 'text/plain', 'ogg'])
         is_html = 'html' in content_type
 
         # --- CASE A: ASSET ---
@@ -148,10 +161,7 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                     pass
                 
                 visible_text = await page.inner_text("body")
-                
-                # Print page text snippet for debugging
                 print(f"\n📄 [PAGE TEXT] ({url}):\n{visible_text[:200]}...\n", flush=True)
-                
                 context_log.append(f"=== PAGE TEXT ({url}) ===\n{visible_text[:4000]}")
                 
                 if depth >= max_depth:
@@ -161,7 +171,9 @@ async def recursive_crawl(url: str, depth: int, browser, max_depth: int = 2):
                 html = await page.content()
                 soup = bs4.BeautifulSoup(html, 'html.parser')
                 links = []
-                for tag in soup.find_all(['a', 'script', 'img', 'source', 'audio']):
+                
+                # Updated Tag Search (Includes Video)
+                for tag in soup.find_all(['a', 'script', 'img', 'source', 'audio', 'video']):
                     href = tag.get('href') or tag.get('src')
                     if href:
                         full_link = urljoin(url, href)
@@ -228,7 +240,7 @@ def execute_generated_code(code_str: str):
         return f"Execution Error: {traceback.format_exc()}"
 
 # ==============================================================================
-# 3. GEMINI ANALYST (DEBUG PROMPT)
+# 3. GEMINI ANALYST
 # ==============================================================================
 async def analyze_task(deep_context: str, current_url: str):
     print("🧠 Gemini is analyzing the gathered context...", flush=True)
@@ -252,8 +264,8 @@ async def analyze_task(deep_context: str, current_url: str):
     
     2. **TRUST THE CONTEXT**:
        - **TEXT**: If page text says "Cutoff: 39529", define `cutoff = 39529`.
-       - **AUDIO**: If transcript says "Sum numbers > cutoff", use `df[df[0] > cutoff].sum()`.
-       - **COMBINE THEM**: Do not ignore the text just because you have audio.
+       - **AUDIO/VIDEO**: Use the transcript logic EXACTLY.
+       - "Sum numbers > 50": `df[df[0] > 50].sum()`.
     
     3. **CSV LOGIC**:
        - Use `header=None` if the preview shows no text headers.
@@ -264,7 +276,7 @@ async def analyze_task(deep_context: str, current_url: str):
     safe_context = deep_context.replace('{', '{{').replace('}', '}}').replace("'", "")
     final_prompt = prompt.format(deep_context=safe_context, current_url=current_url, email=STUDENT_EMAIL)
 
-    # --- LOGGING: PRINT FULL PROMPT ---
+    # --- LOGGING ---
     print("\n📝 [FULL PROMPT SENT TO GEMINI]:", flush=True)
     print("="*60)
     print(final_prompt[:3000] + "... (truncated for readability)")
