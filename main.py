@@ -43,8 +43,13 @@ class TaskPayload(BaseModel):
     url: str
 
 # ==============================================================================
-# 1. THE FORENSIC GATHERER (BREADTH-FIRST STRATEGY)
+# 1. THE RECURSIVE CRAWLER (The "Puzzle Collector")
 # ==============================================================================
+
+# Global sets to track state during a single request
+visited_urls = set()
+context_log = []
+
 def transcribe_media(content: bytes, mime_type: str) -> str:
     """Uploads media to Gemini and gets a description."""
     try:
@@ -62,110 +67,150 @@ def transcribe_media(content: bytes, mime_type: str) -> str:
     except Exception as e:
         return f"[ERROR TRANSCRIBING MEDIA]: {e}"
 
-def inspect_csv(content: str) -> str:
+def inspect_csv(content: bytes) -> str:
     """Peeks at a CSV to get columns and first row."""
     try:
-        df = pd.read_csv(io.StringIO(content))
+        text_val = content.decode('utf-8', errors='ignore')
+        # Handle potential separator issues automatically
+        try:
+            df = pd.read_csv(io.StringIO(text_val))
+        except:
+            df = pd.read_csv(io.StringIO(text_val), sep=None, engine='python')
+            
         return f"[CSV STRUCTURE]: Columns={list(df.columns)}, First Row={df.iloc[0].to_dict()}"
     except Exception as e:
         return f"[CSV ERROR]: {e}"
 
-def process_asset(link: str, content: bytes = None) -> str:
-    """Helper to process a single asset URL (Audio/Image/CSV)."""
-    try:
-        ext = link.lower().split('.')[-1]
-        
-        if content is None:
-            resp = requests.get(link, timeout=5)
-            content = resp.content
-            text_content = resp.text
-        else:
-            text_content = content.decode('utf-8', errors='ignore')
-
-        if ext in ['mp3', 'wav']:
-            return f"--- AUDIO FOUND: {link} ---\n" + transcribe_media(content, "audio/mp3")
-        
-        elif ext in ['png', 'jpg', 'jpeg']:
-            return f"--- IMAGE FOUND: {link} ---\n" + transcribe_media(content, "image/png")
-        
-        elif ext == 'csv':
-            return f"--- CSV FOUND: {link} ---\n" + inspect_csv(text_content)
-        
-        elif ext in ['json', 'txt']:
-            return f"--- DATA FOUND: {link} ---\nCONTENT: {text_content[:1000]}"
-            
-    except Exception as e:
-        return f"⚠️ Error processing {link}: {e}"
+def process_puzzle_piece(url: str, mime_type: str, content: bytes) -> str:
+    """Converts a raw asset (Audio/Image/CSV) into text context."""
+    print(f"   🧩 Found Puzzle Piece ({mime_type}): {url}")
+    
+    if "audio" in mime_type:
+        return f"--- AUDIO FILE ({url}) ---\n" + transcribe_media(content, mime_type)
+    
+    elif "image" in mime_type:
+        return f"--- IMAGE FILE ({url}) ---\n" + transcribe_media(content, mime_type)
+    
+    elif "csv" in mime_type or url.endswith(".csv"):
+        return f"--- CSV DATA ({url}) ---\n" + inspect_csv(content)
+    
+    elif "json" in mime_type or "text" in mime_type:
+        text_val = content.decode('utf-8', errors='ignore')
+        return f"--- TEXT DATA ({url}) ---\nCONTENT: {text_val[:1500]}"
+    
     return ""
 
-async def gather_deep_context(page, base_url):
+def recursive_crawl(url: str, depth: int, max_depth: int = 2):
     """
-    Scans Level 1 (Main Page + Assets) completely BEFORE scanning Level 2 (Sub-pages).
+    The Core Logic:
+    1. Visit URL.
+    2. Identify if it's a Page (Door) or Asset (Piece).
+    3. If Page: Open it, look for links, and RECURSE.
+    4. If Asset: Process it and add to context.
     """
-    print("🕵️ GATHERING DEEP CONTEXT (Breadth-First Mode)...")
+    if url in visited_urls or depth > max_depth:
+        return
     
-    # --- PHASE 1: LEVEL 1 TEXT ---
-    html_content = await page.content()
+    visited_urls.add(url)
+    prefix = "  " * depth # Indentation for logs
+    print(f"{prefix}👉 Crawling: {url} (Depth {depth})")
+
+    try:
+        # 1. HEAD Request to Sniff Type
+        try:
+            head = requests.head(url, timeout=5, allow_redirects=True)
+            content_type = head.headers.get("Content-Type", "").lower()
+        except:
+            # Fallback to GET if HEAD fails
+            content_type = ""
+
+        # 2. Decision Logic
+        is_asset = any(x in content_type for x in ['audio', 'image', 'csv', 'json', 'text/plain'])
+        is_html = 'html' in content_type
+
+        # --- CASE A: IT IS A PUZZLE PIECE (ASSET) ---
+        if is_asset or (not is_html and depth > 0): 
+            # (If we are deep and it's not HTML, assume it's data)
+            resp = requests.get(url, timeout=10)
+            piece_info = process_puzzle_piece(url, content_type, resp.content)
+            if piece_info:
+                context_log.append(piece_info)
+            return
+
+        # --- CASE B: IT IS A DOOR (HTML PAGE) ---
+        if is_html:
+            resp = requests.get(url, timeout=10)
+            soup = bs4.BeautifulSoup(resp.content, 'html.parser')
+            
+            # Clean text extraction
+            for script in soup(["script", "style"]):
+                script.decompose()
+            clean_text = soup.get_text(separator=' ', strip=True)
+            
+            context_log.append(f"=== PAGE TEXT ({url}) ===\n{clean_text[:2000]}")
+            
+            # Stop recursion if we hit max depth
+            if depth >= max_depth:
+                return
+
+            # Find all links to recurse
+            links = []
+            for tag in soup.find_all(['a', 'script', 'img', 'source']):
+                href = tag.get('href') or tag.get('src')
+                if href:
+                    full_link = urljoin(url, href)
+                    # Filter: Only crawl internal links to keep it safe/fast
+                    if "s-anand.net" in full_link or "localhost" in full_link:
+                         # Heuristic: Don't re-crawl the base URL
+                        if full_link not in visited_urls:
+                            links.append(full_link)
+            
+            print(f"{prefix}   ↳ Found {len(links)} links. diving deeper...")
+            
+            # RECURSE
+            for link in links:
+                recursive_crawl(link, depth + 1, max_depth)
+
+    except Exception as e:
+        print(f"{prefix}⚠️ Error crawling {url}: {e}")
+
+async def build_complete_context(page, start_url):
+    """
+    Initializes the recursive crawl starting from the Playwright page.
+    """
+    print("🕵️ STARTING RECURSIVE CRAWL...")
+    
+    # Reset Globals
+    visited_urls.clear()
+    context_log.clear()
+    
+    # 1. Process the Start Page (Level 0) via Playwright (to catch JS-rendered links)
+    html = await page.content()
+    soup = bs4.BeautifulSoup(html, 'html.parser')
+    
+    # Add Level 0 Text
     visible_text = await page.inner_text("body")
-    soup = bs4.BeautifulSoup(html_content, 'html.parser')
+    context_log.append(f"=== START PAGE TEXT ({start_url}) ===\n{visible_text[:3000]}")
+    visited_urls.add(start_url)
     
-    context_log = [f"=== LEVEL 1: MAIN PAGE TEXT ===\n{visible_text[:3000]}"]
-    
-    # Sort links into categories
-    asset_links = set()
-    page_links = set()
-    
+    # Extract Level 0 Links
+    initial_links = []
     for tag in soup.find_all(['a', 'script', 'img', 'source']):
         href = tag.get('href') or tag.get('src')
         if href:
-            full = urljoin(base_url, href)
-            ext = full.lower().split('.')[-1]
-            
-            if "s-anand.net" not in full and "localhost" not in full:
-                continue
-
-            # Identify Assets
-            if ext in ['mp3', 'wav', 'png', 'jpg', 'csv', 'json', 'txt']:
-                asset_links.add(full)
-            # Identify Internal Pages (Not Assets, Not CSS/JS)
-            elif full != base_url and 'http' in full and ext not in ['js', 'css']:
-                 if len(full) < len(base_url) + 50: # Simple heuristics for relative pages
-                    page_links.add(full)
-
-    # --- PHASE 2: LEVEL 1 ASSETS (Process these FIRST) ---
-    print(f"🔎 Level 1: Found {len(asset_links)} assets.")
-    for link in asset_links:
-        print(f"   📦 Processing L1 Asset: {link}")
-        context_log.append(process_asset(link))
-
-    # --- PHASE 3: LEVEL 2 PAGES (Process these LAST) ---
-    print(f"🔎 Level 1: Found {len(page_links)} sub-pages. Diving in...")
-    for link in page_links:
-        print(f"   📄 Scanning L2 Page: {link}")
-        try:
-            resp = requests.get(link, timeout=4)
-            sub_soup = bs4.BeautifulSoup(resp.content, 'html.parser')
-            
-            # 3A. Sub-Page Text
-            clean_text = sub_soup.get_text(separator=' ', strip=True)
-            context_log.append(f"=== LEVEL 2: SUB-PAGE TEXT ({link}) ===\n{clean_text[:1000]}")
-            
-            # 3B. Sub-Page Nested Assets
-            sub_assets = sub_soup.find_all(['a', 'source'])
-            for sub_tag in sub_assets:
-                sub_href = sub_tag.get('href') or sub_tag.get('src')
-                if sub_href:
-                    full_sub = urljoin(link, sub_href)
-                    sub_ext = full_sub.lower().split('.')[-1]
-                    
-                    if sub_ext in ['mp3', 'wav', 'csv', 'txt']:
-                        print(f"      🎯 Found L2 Nested Asset: {full_sub}")
-                        context_log.append(process_asset(full_sub))
-                        
-        except Exception as e:
-            print(f"   ⚠️ Error scanning L2 page: {e}")
+            full = urljoin(start_url, href)
+            if "s-anand.net" in full or "localhost" in full:
+                initial_links.append(full)
+    
+    print(f"🔎 Root Page has {len(initial_links)} links. Starting recursion...")
+    
+    # 2. Trigger Recursion for all found links
+    for link in initial_links:
+        # We start at depth 1
+        recursive_crawl(link, depth=1, max_depth=2)
 
     return "\n\n".join(context_log)
+
 
 # ==============================================================================
 # 2. EXECUTION ENGINE
@@ -200,9 +245,9 @@ async def analyze_task(deep_context: str, current_url: str):
     prompt = r"""
     You are an intelligent Data Extraction Agent.
     
-    I have already visited the page, scanned sub-pages, transcribed audio, and inspected CSV headers.
+    I have performed a recursive crawl of the website, downloading and transcribing all assets (Audio, CSV, Images) found at any level.
     
-    ALL THE CONTEXT IS BELOW (Level 1 is the main page, Level 2 are links):
+    FULL CONTEXT DUMP:
     =========================================
     {deep_context}
     =========================================
@@ -210,14 +255,22 @@ async def analyze_task(deep_context: str, current_url: str):
     CURRENT URL: {current_url}
     MY EMAIL: {email}
     
-    YOUR JOB: Write a Python script to calculate the final `solution`.
+    TASK: Write a Python script to calculate the `solution`.
     
-    RULES:
-    1. **Context Integration**: Combine instructions from LEVEL 1 (e.g., "Cutoff is 50") with data from LEVEL 2 (e.g., "CSV File").
-    2. **CSV Logic**: I have shown you the headers. You MUST write `requests.get()` to download the full CSV and process it.
-    3. **Instructions**: If a transcript says "Sum column X", do exactly that.
-    4. **Hashing**: If you see hashing instructions (SHA1, etc), implement it in Python using `hashlib`.
-    5. **Output**: Return ONLY Python code. Initialize `solution` and `target`.
+    CRITICAL RULES:
+    1. **Puzzle Assembly**: The answer is likely scattered. 
+       - Look for "Instructions" in AUDIO transcripts.
+       - Look for "Data" in CSV STRUCTURE blocks.
+       - Look for "Secrets" in PAGE TEXT blocks.
+    
+    2. **Variable Safety**:
+       - You MUST initialize variables. If the audio transcript says "Sum column 'value'", define `col_name = 'value'`.
+       - Always provide a fallback: `solution = "Not Found"` at the top.
+    
+    3. **CSV Handling**:
+       - I have provided the CSV headers. You MUST write `requests.get()` to download the full CSV and process it.
+    
+    4. **Output**: Return ONLY Python code.
     """
     
     safe_context = deep_context.replace('{', '{{').replace('}', '}}').replace("'", "")
@@ -257,24 +310,21 @@ async def run_quiz_chain(start_url: str):
 
             try:
                 await page.goto(current_url)
-                
                 try:
                     await page.wait_for_load_state("networkidle", timeout=3000)
                 except:
                     pass
                 
-                # --- GATHER DEEP CONTEXT (BREADTH FIRST) ---
-                deep_context = await gather_deep_context(page, current_url)
+                # --- START RECURSIVE CRAWL ---
+                deep_context = await build_complete_context(page, current_url)
                 
-                # --- ANALYZE ---
                 code = await analyze_task(deep_context, current_url)
                 answer = execute_generated_code(code)
                 
-                # --- RETRY LOOP ---
                 retries = 0
                 while "Error" in str(answer) and retries < 2:
                     print(f"⚠️ Code failed. Retrying... ({retries+1}/2)")
-                    fix_prompt = f"Previous code failed with: {answer}\n\nCode:\n{code}\n\nFIX IT."
+                    fix_prompt = f"Previous code failed with: {answer}\n\nCode:\n{code}\n\nFIX IT. Initialize all variables."
                     retry_resp = await asyncio.to_thread(model.generate_content, fix_prompt)
                     code = retry_resp.text
                     answer = execute_generated_code(code)
@@ -282,7 +332,6 @@ async def run_quiz_chain(start_url: str):
                 
                 print(f"💡 Final Answer: {answer}")
                 
-                # --- SUBMIT ---
                 visible_text = await page.inner_text("body")
                 submit_url = extract_submit_url(visible_text, current_url)
                 
